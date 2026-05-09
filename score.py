@@ -72,6 +72,57 @@ def add_counter_trend(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _load_window(since_ts: int) -> pd.DataFrame:
+    """Load >= $50k trades from `since_ts - 1h` onward.
+
+    The 1h buffer gives counter_trend the price-history context it needs
+    for any market touched in the new window. Trades from before the buffer
+    aren't loaded, since add_counter_trend only references same-market
+    prior prices and 1h is the lookback window.
+    """
+    lookback_buffer = 3600  # seconds — matches COUNTER_TREND_LOOKBACK
+    conn = psycopg2.connect(DB_URL)
+    try:
+        df = pd.read_sql(
+            f"""
+            SELECT id, timestamp, condition_id, proxy_wallet, side, size, price,
+                   notional, title, slug, outcome
+            FROM trades
+            WHERE timestamp >= {int(since_ts) - lookback_buffer}
+              AND notional >= {MIN_NOTIONAL}
+            ORDER BY condition_id, timestamp
+            """,
+            conn,
+        )
+    finally:
+        conn.close()
+    if not df.empty:
+        df["dt"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).astype(
+            "datetime64[ns, UTC]"
+        )
+    return df
+
+
+def score_window(since_ts: int) -> pd.DataFrame:
+    """Score >= $50k trades with `timestamp >= since_ts`, returning their scores.
+
+    Loads the window plus 1h of per-market prior context for counter_trend,
+    runs the exact same math as score_recent, and returns only rows newer
+    than since_ts. Used by ingest.py to score newly-inserted rows by id
+    without re-scoring history.
+    """
+    df = _load_window(since_ts)
+    if df.empty:
+        return df
+    df = add_counter_trend(df)
+    df["notional_score"] = np.log10(df["notional"] / MIN_NOTIONAL)
+    df["score"] = (
+        df["notional_score"] * SCORE_WEIGHT_SIZE
+        + df["counter_trend"].astype(int) * SCORE_WEIGHT_COUNTER_TREND
+    )
+    return df[df["timestamp"] >= int(since_ts)].reset_index(drop=True)
+
+
 def score_recent(hours: int = 24) -> pd.DataFrame:
     """Return >= $50k trades from the last `hours` hours with scores attached."""
     df = load_recent_trades()

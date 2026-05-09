@@ -5,15 +5,20 @@ in .github/workflows/ingest.yml.
 """
 import os
 import time
+from functools import lru_cache
+
 import requests
 import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
+import score
+
 load_dotenv()
 
 DB_URL = os.environ["DATABASE_URL"]
 DATA_API_URL = os.environ.get("POLYMARKET_API_URL", "https://data-api.polymarket.com/trades")
+GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 PAGE_SIZE = 1000                  # API caps limit at 10000; smaller pages are politer
@@ -30,6 +35,18 @@ COLOR_SELL = 15158332             # red
 
 def make_id(t: dict) -> str:
     return f"{t['transactionHash']}_{t['proxyWallet']}_{t['asset']}"
+
+
+@lru_cache(maxsize=1024)
+def get_category(condition_id: str):
+    """Fetch a market's category from Gamma. Cached per condition for the run."""
+    try:
+        r = requests.get(f"{GAMMA_API_URL}/{condition_id}", timeout=5)
+        if r.ok:
+            return (r.json() or {}).get("category")
+    except requests.exceptions.RequestException:
+        pass
+    return None
 
 
 def fetch_trades(since_ts: int):
@@ -104,6 +121,7 @@ def upsert(conn, trades):
             int(t["outcomeIndex"]) if t.get("outcomeIndex") is not None else None,
             t.get("name"),
             t.get("pseudonym"),
+            get_category(t["conditionId"]),
         )
         for t in trades
     ]
@@ -114,7 +132,7 @@ def upsert(conn, trades):
         INSERT INTO trades (
             id, transaction_hash, proxy_wallet, asset, condition_id,
             side, size, price, timestamp,
-            title, slug, outcome, outcome_index, name, pseudonym
+            title, slug, outcome, outcome_index, name, pseudonym, category
         )
         VALUES %s
         ON CONFLICT (id) DO NOTHING
@@ -128,6 +146,46 @@ def upsert(conn, trades):
     cur.close()
     new_ids = {r[0] for r in returned}
     return [t for t in trades if make_id(t) in new_ids]
+
+
+def write_scores(conn, new_trades):
+    """Score the just-inserted trades and UPDATE their score columns by id."""
+    if not new_trades:
+        return 0
+    new_ids = {make_id(t) for t in new_trades}
+    min_ts = min(int(t["timestamp"]) for t in new_trades)
+    scored = score.score_window(min_ts)
+    if scored.empty:
+        return 0
+    scored = scored[scored["id"].isin(new_ids)]
+    if scored.empty:
+        return 0
+    rows = [
+        (
+            float(r["score"]),
+            float(r["notional_score"]),
+            bool(r["counter_trend"]),
+            r["id"],
+        )
+        for _, r in scored.iterrows()
+    ]
+    cur = conn.cursor()
+    execute_values(
+        cur,
+        """
+        UPDATE trades AS t SET
+            score          = v.score,
+            notional_score = v.notional_score,
+            counter_trend  = v.counter_trend
+        FROM (VALUES %s) AS v(score, notional_score, counter_trend, id)
+        WHERE t.id = v.id
+        """,
+        rows,
+        page_size=500,
+    )
+    conn.commit()
+    cur.close()
+    return len(rows)
 
 
 def notify_whales(trades):
@@ -177,6 +235,9 @@ def main():
         print(f"Fetched {len(trades)} trades from Data API")
         new_trades = upsert(conn, trades)
         print(f"Upserted {len(new_trades)} new rows. Latest ts is now {latest_timestamp(conn)}")
+        n_scored = write_scores(conn, new_trades)
+        if n_scored:
+            print(f"Scored {n_scored} new rows (>= ${score.MIN_NOTIONAL:,.0f})")
         notify_whales(new_trades)
     finally:
         conn.close()
