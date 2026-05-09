@@ -7,19 +7,25 @@ import os
 import time
 import requests
 import psycopg2
-from psycopg2.extras import execute_batch
+from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
 load_dotenv()
 
 DB_URL = os.environ["DATABASE_URL"]
 DATA_API_URL = os.environ.get("POLYMARKET_API_URL", "https://data-api.polymarket.com/trades")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 PAGE_SIZE = 1000                  # API caps limit at 10000; smaller pages are politer
 MAX_OFFSET = 100_000              # safety stop for cold-start runs
 BOOTSTRAP_LOOKBACK_DAYS = 7       # how far back to seed when the table is empty
 OVERLAP_SECONDS = 300             # re-scan the last 5 min so newly-arrived trades
                                   # that shifted offsets mid-page aren't missed
+
+WHALE_NOTIONAL = 100_000.0        # alert threshold - $100k
+DASHBOARD_URL = "https://jacobatt-polymarket.streamlit.app"
+COLOR_BUY = 3066993               # green
+COLOR_SELL = 15158332             # red
 
 
 def make_id(t: dict) -> str:
@@ -77,9 +83,10 @@ def latest_timestamp(conn) -> int:
     return int(ts)
 
 
-def upsert(conn, trades) -> int:
+def upsert(conn, trades):
+    """Insert trades, skipping dupes. Returns the list of dicts actually inserted."""
     if not trades:
-        return 0
+        return []
     rows = [
         (
             make_id(t),
@@ -101,7 +108,7 @@ def upsert(conn, trades) -> int:
         for t in trades
     ]
     cur = conn.cursor()
-    execute_batch(
+    returned = execute_values(
         cur,
         """
         INSERT INTO trades (
@@ -109,15 +116,53 @@ def upsert(conn, trades) -> int:
             side, size, price, timestamp,
             title, slug, outcome, outcome_index, name, pseudonym
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES %s
         ON CONFLICT (id) DO NOTHING
+        RETURNING id
         """,
         rows,
         page_size=500,
+        fetch=True,
     )
     conn.commit()
     cur.close()
-    return len(rows)
+    new_ids = {r[0] for r in returned}
+    return [t for t in trades if make_id(t) in new_ids]
+
+
+def notify_whales(trades):
+    """POST a Discord embed for each newly-inserted trade >= WHALE_NOTIONAL."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    sent = 0
+    for t in trades:
+        notional = float(t["size"]) * float(t["price"])
+        if notional < WHALE_NOTIONAL:
+            continue
+        side = t["side"]
+        wallet = t.get("proxyWallet") or ""
+        embed = {
+            "title": t.get("title") or "(unknown market)",
+            "url": DASHBOARD_URL,
+            "color": COLOR_BUY if side == "BUY" else COLOR_SELL,
+            "fields": [
+                {"name": "Side",     "value": side, "inline": True},
+                {"name": "Notional", "value": f"${notional/1e6:.2f}M", "inline": True},
+                {"name": "Outcome",  "value": t.get("outcome") or "?", "inline": True},
+                {"name": "Wallet",   "value": f"{wallet[:10]}...", "inline": True},
+            ],
+        }
+        try:
+            requests.post(
+                DISCORD_WEBHOOK_URL,
+                json={"embeds": [embed]},
+                timeout=10,
+            )
+            sent += 1
+        except requests.exceptions.RequestException as e:
+            print(f"Discord webhook failed for ${notional/1e6:.2f}M trade: {e}")
+    if sent:
+        print(f"Sent {sent} whale alert(s) to Discord")
 
 
 def main():
@@ -130,8 +175,9 @@ def main():
         print(f"Fetching trades after Unix ts {since}")
         trades = fetch_trades(since)
         print(f"Fetched {len(trades)} trades from Data API")
-        n = upsert(conn, trades)
-        print(f"Upserted {n} rows. Latest ts is now {latest_timestamp(conn)}")
+        new_trades = upsert(conn, trades)
+        print(f"Upserted {len(new_trades)} new rows. Latest ts is now {latest_timestamp(conn)}")
+        notify_whales(new_trades)
     finally:
         conn.close()
 
