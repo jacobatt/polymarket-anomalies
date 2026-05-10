@@ -38,15 +38,30 @@ def make_id(t: dict) -> str:
 
 
 @lru_cache(maxsize=1024)
-def get_category(condition_id: str):
-    """Fetch a market's category from Gamma. Cached per condition for the run."""
+def get_market_meta(condition_id: str):
+    """Fetch (category, end_date_iso) for a market from Gamma. Cached per
+    condition for the run. end_date is the resolution timestamp; trades
+    after it are settlement noise, not predictions, and score.py drops
+    them from feed eligibility.
+
+    Gamma's `/markets/{id}` path expects a numeric internal id; using a
+    conditionId hex string there hits an undefined route that hangs the
+    socket past any read timeout. The query-param form is the documented
+    lookup-by-conditionId path and returns a list (we always limit=1)."""
     try:
-        r = requests.get(f"{GAMMA_API_URL}/{condition_id}", timeout=5)
+        r = requests.get(
+            GAMMA_API_URL,
+            params={"conditionIds": condition_id, "limit": 1},
+            timeout=10,
+        )
         if r.ok:
-            return (r.json() or {}).get("category")
+            data = r.json() or []
+            if data:
+                m = data[0]
+                return (m.get("category"), m.get("endDate"))
     except requests.exceptions.RequestException:
         pass
-    return None
+    return (None, None)
 
 
 def fetch_trades(since_ts: int):
@@ -121,7 +136,7 @@ def upsert(conn, trades):
             int(t["outcomeIndex"]) if t.get("outcomeIndex") is not None else None,
             t.get("name"),
             t.get("pseudonym"),
-            get_category(t["conditionId"]),
+            *get_market_meta(t["conditionId"]),  # (category, market_end_date)
         )
         for t in trades
     ]
@@ -132,7 +147,8 @@ def upsert(conn, trades):
         INSERT INTO trades (
             id, transaction_hash, proxy_wallet, asset, condition_id,
             side, size, price, timestamp,
-            title, slug, outcome, outcome_index, name, pseudonym, category
+            title, slug, outcome, outcome_index, name, pseudonym,
+            category, market_end_date
         )
         VALUES %s
         ON CONFLICT (id) DO NOTHING

@@ -25,7 +25,8 @@ SCORE_WEIGHT_COUNTER_TREND = 3.0
 
 
 def load_recent_trades() -> pd.DataFrame:
-    """Pull the last N days of >= $50k trades."""
+    """Pull the last N days of >= $50k trades, excluding post-resolution
+    settlement trades (timestamp at or past market_end_date)."""
     conn = psycopg2.connect(DB_URL)
     try:
         df = pd.read_sql(
@@ -35,6 +36,8 @@ def load_recent_trades() -> pd.DataFrame:
             FROM trades
             WHERE timestamp > EXTRACT(EPOCH FROM NOW() - INTERVAL '{LOOKBACK_DAYS} days')
               AND notional >= {MIN_NOTIONAL}
+              AND (market_end_date IS NULL
+                   OR timestamp < EXTRACT(EPOCH FROM market_end_date))
             ORDER BY condition_id, timestamp
             """,
             conn,
@@ -73,7 +76,8 @@ def add_counter_trend(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_window(since_ts: int) -> pd.DataFrame:
-    """Load >= $50k trades from `since_ts - 1h` onward.
+    """Load >= $50k trades from `since_ts - 1h` onward, excluding post-
+    resolution settlement trades.
 
     The 1h buffer gives counter_trend the price-history context it needs
     for any market touched in the new window. Trades from before the buffer
@@ -90,6 +94,8 @@ def _load_window(since_ts: int) -> pd.DataFrame:
             FROM trades
             WHERE timestamp >= {int(since_ts) - lookback_buffer}
               AND notional >= {MIN_NOTIONAL}
+              AND (market_end_date IS NULL
+                   OR timestamp < EXTRACT(EPOCH FROM market_end_date))
             ORDER BY condition_id, timestamp
             """,
             conn,
