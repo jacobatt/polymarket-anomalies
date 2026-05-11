@@ -19,7 +19,6 @@ load_dotenv()
 DB_URL = os.environ["DATABASE_URL"]
 DATA_API_URL = os.environ.get("POLYMARKET_API_URL", "https://data-api.polymarket.com/trades")
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 PAGE_SIZE = 1000                  # API caps limit at 10000; smaller pages are politer
 MAX_OFFSET = 100_000              # safety stop for cold-start runs
@@ -27,10 +26,10 @@ BOOTSTRAP_LOOKBACK_DAYS = 7       # how far back to seed when the table is empty
 OVERLAP_SECONDS = 300             # re-scan the last 5 min so newly-arrived trades
                                   # that shifted offsets mid-page aren't missed
 
-WHALE_NOTIONAL = 100_000.0        # alert threshold - $100k
-DASHBOARD_URL = "https://jacobatt-polymarket.streamlit.app"
-COLOR_BUY = 3066993               # green
-COLOR_SELL = 15158332             # red
+# Discord alerts moved out of this cron and into the Vercel worker at
+# /api/alerts/run, driven by the alert_rules table. See migration.md
+# § "Alert worker" in the polyanomalies repo. The legacy ">= $100k"
+# behavior can be reproduced by adding a rule with min_notional=100000.
 
 
 def make_id(t: dict) -> str:
@@ -204,41 +203,6 @@ def write_scores(conn, new_trades):
     return len(rows)
 
 
-def notify_whales(trades):
-    """POST a Discord embed for each newly-inserted trade >= WHALE_NOTIONAL."""
-    if not DISCORD_WEBHOOK_URL:
-        return
-    sent = 0
-    for t in trades:
-        notional = float(t["size"]) * float(t["price"])
-        if notional < WHALE_NOTIONAL:
-            continue
-        side = t["side"]
-        wallet = t.get("proxyWallet") or ""
-        embed = {
-            "title": t.get("title") or "(unknown market)",
-            "url": DASHBOARD_URL,
-            "color": COLOR_BUY if side == "BUY" else COLOR_SELL,
-            "fields": [
-                {"name": "Side",     "value": side, "inline": True},
-                {"name": "Notional", "value": f"${notional/1e6:.2f}M", "inline": True},
-                {"name": "Outcome",  "value": t.get("outcome") or "?", "inline": True},
-                {"name": "Wallet",   "value": f"{wallet[:10]}...", "inline": True},
-            ],
-        }
-        try:
-            requests.post(
-                DISCORD_WEBHOOK_URL,
-                json={"embeds": [embed]},
-                timeout=10,
-            )
-            sent += 1
-        except requests.exceptions.RequestException as e:
-            print(f"Discord webhook failed for ${notional/1e6:.2f}M trade: {e}")
-    if sent:
-        print(f"Sent {sent} whale alert(s) to Discord")
-
-
 def main():
     conn = psycopg2.connect(DB_URL)
     try:
@@ -254,7 +218,6 @@ def main():
         n_scored = write_scores(conn, new_trades)
         if n_scored:
             print(f"Scored {n_scored} new rows (>= ${score.MIN_NOTIONAL:,.0f})")
-        notify_whales(new_trades)
     finally:
         conn.close()
 
