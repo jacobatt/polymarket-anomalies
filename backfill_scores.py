@@ -1,4 +1,4 @@
-"""One-off historical backfill of score columns for existing >= $50k trades.
+"""One-off historical backfill of score columns for existing >= $30k trades.
 
 Three passes:
   1. Backfill `market_end_date` for any condition_id that's still NULL.
@@ -10,7 +10,7 @@ Three passes:
   3. Re-score using score.score_recent (which now filters out settlement
      trades at the SQL level) and bulk-UPDATE survivors.
 
-Sub-$50k rows stay NULL throughout — same partial-index semantics. After
+Sub-$30k rows stay NULL throughout — same partial-index semantics. After
 running, `SELECT COUNT(*) FROM trades WHERE score IS NOT NULL` should
 drop relative to before.
 
@@ -135,7 +135,7 @@ def write_scores(conn) -> int:
     matching rows. Returns rows updated."""
     df = score.score_recent(hours=score.LOOKBACK_DAYS * 24)
     if df.empty:
-        print("No scoreable trades found (>= $50k, pre-resolution)")
+        print("No scoreable trades found (>= $30k, pre-resolution)")
         return 0
     rows = [
         (

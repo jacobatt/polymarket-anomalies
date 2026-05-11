@@ -1,8 +1,8 @@
 """Anomaly scoring over the trades table.
 
-Only materially-sized trades (>= $50k notional) make it into the feed at all.
+Only materially-sized trades (>= $30k notional) make it into the feed at all.
 Each surviving trade gets a score combining:
-  - notional_score: log10(notional / 50k), so $50k=0, $500k=1, $5M=2
+  - notional_score: log10(notional / 30k), so $30k=0, $300k=1, $3M=2
   - counter_trend:  buy direction opposite to recent price drift, +3
 
 Add new signals here (concentration, wallet age, market share) and they will
@@ -19,13 +19,13 @@ DB_URL = os.environ["DATABASE_URL"]
 
 LOOKBACK_DAYS = 30
 COUNTER_TREND_LOOKBACK = "1h"
-MIN_NOTIONAL = 50_000.0  # hard filter - trades below this never enter the feed
+MIN_NOTIONAL = 30_000.0  # hard filter - trades below this never enter the feed
 SCORE_WEIGHT_SIZE = 1.0
 SCORE_WEIGHT_COUNTER_TREND = 3.0
 
 
 def load_recent_trades() -> pd.DataFrame:
-    """Pull the last N days of >= $50k trades, excluding post-resolution
+    """Pull the last N days of >= $30k trades, excluding post-resolution
     settlement trades (timestamp at or past market_end_date)."""
     conn = psycopg2.connect(DB_URL)
     try:
@@ -76,7 +76,7 @@ def add_counter_trend(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_window(since_ts: int) -> pd.DataFrame:
-    """Load >= $50k trades from `since_ts - 1h` onward, excluding post-
+    """Load >= $30k trades from `since_ts - 1h` onward, excluding post-
     resolution settlement trades.
 
     The 1h buffer gives counter_trend the price-history context it needs
@@ -110,7 +110,7 @@ def _load_window(since_ts: int) -> pd.DataFrame:
 
 
 def score_window(since_ts: int) -> pd.DataFrame:
-    """Score >= $50k trades with `timestamp >= since_ts`, returning their scores.
+    """Score >= $30k trades with `timestamp >= since_ts`, returning their scores.
 
     Loads the window plus 1h of per-market prior context for counter_trend,
     runs the exact same math as score_recent, and returns only rows newer
@@ -130,7 +130,7 @@ def score_window(since_ts: int) -> pd.DataFrame:
 
 
 def score_recent(hours: int = 24) -> pd.DataFrame:
-    """Return >= $50k trades from the last `hours` hours with scores attached."""
+    """Return >= $30k trades from the last `hours` hours with scores attached."""
     df = load_recent_trades()
     if df.empty:
         return df
