@@ -90,10 +90,27 @@ TOPICS = [
                           "fed chair", "fed chairman", "tariff",
                           "us x ", "us strikes", "us forces", "us obtains",
                           "u.s. "]),
-    ("NBA",              ["nba", "lakers", "celtics", "warriors", "knicks",
-                          "nuggets", "bucks", "76ers", "sixers", "thunder"]),
+    # College checked BEFORE NBA so school nicknames that collide with NBA
+    # team names (South Florida Bulls, Hawaii Rainbow Warriors, Virginia
+    # Cavaliers, etc.) get routed correctly.
     ("College sports",   ["ncaa", "college football", "college basketball",
-                          "march madness", "vanderbilt", "cornhuskers"]),
+                          "march madness", "vanderbilt", "cornhuskers",
+                          "buckeyes", "wildcats", "jayhawks", "broncos",
+                          "tar heels", "huskies", "bruins", "longhorns",
+                          "crimson tide", "razorbacks", "volunteers",
+                          "red storm", "horned frogs", "gaels",
+                          "rainbow warriors", "south florida", "louisville",
+                          "mcneese", "akron", "northern iowa", "santa clara",
+                          "saint mary", "hofstra", "utah state",
+                          "texas tech", "tcu ", "uconn", "iowa state",
+                          "villanova", "tennessee volunteers"]),
+    ("NBA",              ["nba", "lakers", "celtics", "warriors", "knicks",
+                          "nuggets", "bucks", "76ers", "sixers", "thunder",
+                          "hawks", "nets", "hornets", "bulls", "cavaliers",
+                          "mavericks", "pistons", "rockets", "pacers",
+                          "clippers", "grizzlies", "heat ", "timberwolves",
+                          "pelicans", "magic ", "suns", "trail blazers",
+                          "kings", "spurs", "raptors", "jazz ", "wizards"]),
 ]
 
 
@@ -317,6 +334,19 @@ def main():
         print(f"  {name:<22} {d['wins']:>5} {d['losses']:>7} "
               f"{money(d['pnl']):>16}")
     print()
+
+    # ---------- "shouldn't be doing this" ----------
+    # Domains with a real sample size (>10 closed markets) where the
+    # trader is net-negative — their edge breaks down here.
+    bad = [(n, d) for n, d in buckets.items()
+           if d["wins"] + d["losses"] > 10 and d["pnl"] < 0]
+    if bad:
+        print("SHOULDN'T BE DOING THIS — topics with >10 closed markets and net negative P&L")
+        print("-" * 72)
+        for name, d in sorted(bad, key=lambda kv: kv[1]["pnl"]):
+            print(f"  {name:<22} {d['wins']:>3}W / {d['losses']:>3}L   "
+                  f"net {money(d['pnl'])}")
+        print()
 
     # ---------- pattern queries ----------
     print("PATTERN QUERIES")
